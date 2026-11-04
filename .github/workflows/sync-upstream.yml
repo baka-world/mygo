@@ -49,6 +49,13 @@ jobs:
           git push origin HEAD:main
           echo "merged upstream $(git rev-parse --short upstream/main)"
 
+      - name: Build
+        # Warms the module cache the CLI's template tests vet against, which
+        # run with GOPROXY=off.
+        run: |
+          go build ./...
+          go vet ./...
+
       - name: Test
         # The fork is what dsh-gtk builds against, so a merge that breaks the
         # CLI must not linger on main unnoticed. The desktop packages need
