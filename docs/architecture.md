@@ -1395,7 +1395,21 @@ build` like mygo-runtime and released with the same version.
   from SwiftUI's `safeAreaBar` over test patterns, its layers dumped).
   Both effects' shaders are compiled ahead of time on macOS
   (`shaders_darwin.go`) and on Windows (`shaders_windows.go`), with
-  `internal/gen`.
+  `internal/gen`. `glass.Group` paints one surface over a row of elements:
+  a shader of package `ui/shader` (Kage, compiled for every renderer and
+  the CPU) takes up to 8 rectangles and radii, unions them with a smooth
+  minimum (so panes that nearly touch bridge), and draws the glass once
+  around the union's bezel. `Glass{Native: true}` asks the window's
+  surface for the system's glass: `ui.NativeGlassMaterial`, noted when the
+  frame commits (`ui/nativeglass.go`), tells the surface where the glass
+  is (`platform.GlassSurface.PlaceGlass`). On macOS the surface puts an
+  `NSGlassEffectView` under the content and above the web views, and the
+  material leaves a hole where it shows, so the glass samples a web view's
+  page or the window's material, never the frame's own pixels; elsewhere,
+  and with Reduce Transparency, the shader draws it. The materials read
+  `ui.Painter.Preferences`: Reduce Transparency draws opaque surfaces,
+  Increase Contrast lights the rim. Window-level glass takes a tint
+  through `NSGlassEffectView`'s `tintColor`.
 - **loading** is loading.dev's 29 indicators (`loading-dev`, React and
   CSS) for native UI, on ui's public API only. Each is a box of
   `RoleProgress` whose draw function asks for the next frame
@@ -1969,7 +1983,12 @@ as in Tauri:
   `window.open()` without one itself before asking
   (`javascript-can-open-windows-automatically` stays off), so the handler
   sees those only on macOS and Windows; on Windows the event arguments'
-  `get_IsUserInitiated`, WebView2 having no pop-up blocker.
+  `get_IsUserInitiated`, WebView2 having no pop-up blocker. Only main-frame
+  navigations reach `OnWillNavigate`: on Linux the action's target frame
+  says so (`webkit_navigation_action_get_target_frame_info`, 2.56+, bound
+  when present); before it WebKitGTK tells no navigation's frame, and
+  `mainFrameNavigation` takes all for the main frame's but `about:srcdoc`,
+  which only an iframe shows.
 
 ## Menus
 
@@ -2410,6 +2429,16 @@ either.
   `XF86Forward` on Linux, and `WM_XBUTTONUP` (taken, so that
   DefWindowProc sends no `WM_APPCOMMAND` as well), `VK_BROWSER_BACK` and
   `VK_BROWSER_FORWARD`, and `WM_APPCOMMAND`'s browser commands on Windows.
+  A key held down repeats as `KeyPressed` with `Repeat`, which the
+  shortcut that takes it tells (`shortcutReg.repeat`,
+  `Context.ShortcutRepeated`): `isARepeat` on macOS (and the current
+  event's, for the Edit menu's commands that reach shortcuts), bit 30 of
+  `WM_KEYDOWN`'s lParam on Windows, `KeyboardEvent.repeat` in browsers.
+  GdkEventKey flags none, so the Linux surface notes the hardware
+  keycodes held (`keysDown`, before the input method sees the key): a
+  press of one held already, with no release between, is a repeat, as X11
+  with detectable auto-repeat (which GDK turns on) and GTK's own repeat on
+  Wayland send them.
   A key typed while the input method composes is the input method's
   alone, as Enter choosing a candidate: on macOS `keyDown:` sends no
   `KeyPressed` while there is marked text, as GTK's input method filters
@@ -2569,7 +2598,16 @@ either.
   (`ui/scroll.go`): elements that asked to `ScrollIntoView`, and the focus,
   come into view before the boxes are placed, and placing keeps each offset
   within its content; a `ScrollState` mirrors an offset both ways, and a
-  frame that moved one builds another for what read the old one. Frames
+  frame that moved one builds another for what read the old one. A
+  container that snaps (`ScrollSnap`, `ui/snap.go`) finds the places its
+  elements mark as it is placed, from their boxes relative to it, and
+  keeps the offset at the one it rests at; a notch or a key heads for the
+  next place at once, a touchpad's scrolling once it has been still for a
+  moment (not every platform tells when the fingers lift or a fling's
+  momentum ends), along a spring that the frames advance (`glideSnaps`).
+  Only `ScrollSnap` installs what snapping takes (`placeSnapper`, the
+  `snapper` interface of the container's state), so apps that do not snap
+  leave it out. Frames
   happen only when asked: input, `Invalidate`, `After`, or `AnimationFrame`
   while something moves.
   The view builds the whole tree each frame, but layout reuses what did not
@@ -2984,6 +3022,25 @@ either.
   `ShapeRichText` retain per-paragraph `TextLayout` geometry, its lines
   included (`Lines`), as a paginating reader needs; an application
   owns its buffer, selections, rendering, editing and undo policy.
+- **Sticky elements** (`ui/sticky.go`). `Sticky` sets `layoutStyle.sticky`,
+  which keeps the insets of an element in the flow from moving it as
+  relative positioning (`relative`); `place`, which reaches an element
+  after its parent and the scroll containers around it, then moves it and
+  what is inside it by `stickyShift`, as CSS Positioned Layout's sticky
+  positioning does: per axis, the padding box of the nearest container
+  scrolling that way (or following one, `ScrollWith`), or the window's,
+  less the insets, is where its margin box stays, within its parent's
+  content box (the content it scrolls, for a scroll container), the
+  start's inset winning (`stick`). Unlike CSS, which makes a container
+  scrolling one way scroll both, each axis looks for its own container,
+  as one here scrolls only the ways it says. Being in window coordinates
+  once placed, the box is where hits, ink, accessibility bounds and the
+  focus ring read it; `laidOutOrigin`, which overlays attach by before
+  `place`, and `reveal` add the same shift, so that a popover follows it
+  and the focus coming to it where it shows scrolls nothing. It paints in
+  its parent's second pass, among the absolute children, and commit moves
+  its hits there (`stickyHits`), while it commits in the flow, so that
+  Tab and assistive technology keep its place among its siblings.
 - **Right to left** (`ui/direction.go`). Each element has a direction
   (`node.dir`): built, it takes its parent's, and the root the window's,
   which `surface.Conn.RightToLeft` gives (package `mygo` from the app's
@@ -3934,9 +3991,13 @@ either.
   2D context (`canvas_js.go`, see [Browsers](#browsers-internalweb)). They find the fonts, fall
   back to other fonts for what one lacks, shape, run the bidirectional
   algorithm and break lines; font files stay memory mapped and shared with
-  every other process. The package assembles their lines into layouts, with
-  its own whitespace trimming, ellipsis, alignment, carets and selection, so
-  those behave the same everywhere, and caches layouts by their parameters.
+  every other process. Every engine gives a line's glyphs in visual order,
+  from the left, through right-to-left runs too (DirectWrite's runs, whose
+  glyphs come in logical order, are reversed), so that what walks them,
+  and `ui.Shape`'s callers, rely on one order. The package assembles their
+  lines into layouts, with its own whitespace trimming, ellipsis,
+  alignment, carets and selection, so those behave the same everywhere,
+  and caches layouts by their parameters.
   A text that wraps none of its lines lays out alike at any width they
   fit in, but for where its alignment puts its lines: `LayoutFrom` lays
   it out at another width as the layout it is given (`ui` gives an
@@ -4050,7 +4111,11 @@ either.
   Opaque `Painter.StrokePolyline` on a GPU is the exception: each segment
   is a rotated fill with round ends, drawn as other fills are, without a
   mask; translucent ones, and the CPU renderer, take the mask's way, so
-  that overlapping segments do not show darker.
+  that overlapping segments do not show darker. A translucent line of one
+  segment overlaps nothing, and is a rotated fill too: the stripes of a
+  diff's fillers are hundreds of these, whose one mask would be as wide
+  and as high as the filler in view is high, rasterized again as that
+  changes, and drawn that large for each stripe.
   So are icons: `internal/svg` parses SVG documents (with `encoding/xml`
   and its own small CSS cascade) into nodes of paths, paints and layers,
   and draws them on the CPU with `internal/vec`, compositing gradients,
@@ -4600,8 +4665,14 @@ either.
   (`ui/headless.go`) with the CPU renderer, at its own time
   (`engine.clock`), which stands still until `Tester.Advance` moves it.
   Its host runs no timer; it notes their deadlines, and `Advance` runs
-  the frames due. The fake backend's surface lets the core's tests drive
-  content windows through `package mygo`.
+  the frames due. `Tester.Access` and `AccessByRole`
+  (`ui/tester_access.go`) build the last frame's accessibility tree on
+  demand, as `accessTree` does for a window, and give its nodes as
+  `AccessInfo`: the role an element was given (`node.role`), so that
+  roles sharing a node's role stay apart, or the one following the
+  node's in the order of `Role`; a role added to both needs nothing
+  there, a state a field. The fake backend's surface lets the core's
+  tests drive content windows through `package mygo`.
   `BenchmarkFrame` in `ui` measures a frame of a large window on the CPU,
   and `BenchmarkListScroll` the frames scrolling a list of a million rows;
   `BenchmarkDiff*` the frames of a window as godiff's, two lists of texts
@@ -5306,7 +5377,7 @@ which npm allows only for packages that exist: the first release uses an
 | a web view scaled and rounded with native UI (`WebViewPlacement`) | the pane's bounds scale it, its layer's corners cut it | WebKitGTK zooms the page to its view's size, which `resize`s it at the same width; `draw` clipped to the corners on whole pixels | the visual's transform scales it, a rectangle clip cuts it |
 | WebViewAvailable (any goroutine, before `Run` too) | `WKWebView` is there, which macOS always has | WebKitGTK 4.1 (or 4.0), JavaScriptCore and libsoup load, as `webKit` loads them for a window showing a page | `internal/webview2` finds a runtime, or a `WebView2Loader.dll` next to the executable exports what `createEnvironment` calls; once an environment was made, whether that worked. A runtime whose files are there but whose browser is not passes, and fails later, making the web view |
 | secrets | Security.framework generic passwords in the login keychain (`SecItem*`), service and account as keytar | libsecret's `org.freedesktop.Secret.Generic` schema (attributes `service`, `account`), loaded on first use, libsecret 0.19 or later; no libsecret, no session bus (`g_bus_get_sync`) or no Secret Service on it (`G_DBUS_ERROR_SERVICE_UNKNOWN`, `NAME_HAS_NO_OWNER`, `NO_SERVER`) is `ErrUnsupported` | Credential Manager generic credentials (`CredWriteW`), target `service/account` |
-| vibrancy | all materials, behind pages and native UI; Liquid Glass (`NSGlassEffectView`) from macOS 26, the popover and HUD materials before; frameless windows cut to `CornerRadius`; `SetActiveAppearance` through AppKit's private `_setForceMainAppearance:` | ignored | Windows 11 22H2 Mica, Acrylic, Tabbed, behind pages and native UI, in windows created with a material, which have no menu bar; Liquid Glass as Acrylic; frameless windows given a `CornerRadius` rounded by DWM |
+| vibrancy | all materials, behind pages and native UI; Liquid Glass (`NSGlassEffectView`) from macOS 26, the popover and HUD materials before, with a `tintColor` and the native UI's `Glass{Native}` placed over web views; frameless windows cut to `CornerRadius`; `SetActiveAppearance` through AppKit's private `_setForceMainAppearance:` | ignored | Windows 11 22H2 Mica, Acrylic, Tabbed, behind pages and native UI, in windows created with a material, which have no menu bar; Liquid Glass as Acrylic; frameless windows given a `CornerRadius` rounded by DWM |
 | active windows | the core's state, from key windows; materials follow AppKit's (`NSVisualEffectStateFollowsWindowActiveState`), but panels', flyouts' and kept ones' (`NSVisualEffectStateActive`) | the core's state, from GDK's focus; GTK's own title bar goes `:backdrop` as a focusable flyout takes the keyboard | the core's state, from `WM_ACTIVATE`; DWM's Mica and Acrylic follow the frame, kept active while the window's focusable flyout is (`WM_NCACTIVATE`) |
 | accent color and accessibility preferences | `NSColor.controlAccentColor` (10.14+), `accessibilityDisplayShouldReduceMotion` (10.12+), `accessibilityDisplayShouldReduceTransparency` and `accessibilityDisplayShouldIncreaseContrast` (10.10+), with `NSSystemColorsDidChangeNotification` and `NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification`; no text scale | GTK's `gtk-enable-animations` and theme name, and the settings portal's accent, contrast and GNOME's `text-scaling-factor` (`ReadAll`, `SettingChanged`); no reduced transparency | DWM's `AccentColor`, `SPI_GETCLIENTAREAANIMATION`, Personalize's `EnableTransparency`, `SPI_GETHIGHCONTRAST` and Accessibility's `TextScaleFactor`, with `WM_SETTINGCHANGE` |
 | preferred languages | the global `AppleLanguages` (`CFPreferencesCopyValue`), not the app's | `LANGUAGE`, then `LC_ALL`, `LC_MESSAGES`, `LANG`; read when asked, no changes reported | `GetUserPreferredUILanguages`, `WM_SETTINGCHANGE` "intl" |
