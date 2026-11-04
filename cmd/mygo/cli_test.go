@@ -602,6 +602,9 @@ func TestDesktopEntryStartupWMClass(t *testing.T) {
 	}{
 		{"notes", false, "StartupWMClass=notes\n", ""},
 		{"notes", true, "StartupWMClass=notes\n", "StartupWMClass=notes %U"},
+		// The Debian package and the PKGBUILD run the app from /opt: the
+		// window class is still the basename.
+		{"/opt/notes/notes", false, "StartupWMClass=notes\n", "StartupWMClass=/opt/notes/notes"},
 	} {
 		c := &Config{Name: "Notes", Identifier: "com.example.notes", Version: "1.0.0"}
 		if tc.mime {

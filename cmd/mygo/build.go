@@ -609,9 +609,10 @@ func writeLinuxDesktop(c *Config, dir, name string) ([]string, error) {
 // have them in (mygo.appName, mygo.appDescription), which launchers show
 // for the system's locale.
 func linuxDesktopEntry(c *Config, exec, icon string) string {
-	// The WM_CLASS of the window, which is the program name, before the
-	// arguments of a file or URL land in Exec.
-	wmClass := exec
+	// The WM_CLASS of the window is the basename of argv[0], which the
+	// .deb and the PKGBUILD name with its path in /opt, before the arguments
+	// of a file or URL land in Exec.
+	wmClass := filepath.Base(exec)
 	categories := c.Linux.Categories
 	if len(categories) == 0 {
 		categories = []string{"Utility"}
