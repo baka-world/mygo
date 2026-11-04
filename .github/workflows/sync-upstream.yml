@@ -1,0 +1,56 @@
+# Keep this fork level with egoist/mygo.
+#
+# dsh-gtk depends on this fork rather than upstream: our patches (see the
+# merges below `main`) ship before upstream merges them, and a desktop shell
+# cannot wait days for a release to fix a startup bug. Upstream is still the
+# source of truth, so this merges its `main` in on a schedule.
+#
+# Conflicts fail the run on purpose: they mean upstream rewrote the lines a
+# patch owns, and someone has to look. The fix is to resolve them locally,
+# push, and let the next run continue.
+name: Sync upstream
+
+on:
+  schedule:
+    # Every six hours, at a quarter past: GitHub's cron is UTC and busy on the
+    # hour, and a late sync is fine.
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+  # A push of upstream's own doesn't reach this repository; the schedule is
+  # the trigger. Run it by hand after a patch is merged upstream.
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Merge upstream main
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/egoist/mygo.git
+          git fetch --no-tags upstream main
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "upstream main is already merged"
+            exit 0
+          fi
+          git merge --no-edit upstream/main
+          git push origin HEAD:main
+          echo "merged upstream $(git rev-parse --short upstream/main)"
+
+      - name: Test
+        # The fork is what dsh-gtk builds against, so a merge that breaks the
+        # CLI must not linger on main unnoticed. The desktop packages need
+        # GTK; the CLI's own tests do not.
+        run: go test ./cmd/mygo
