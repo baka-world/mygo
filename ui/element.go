@@ -3,6 +3,7 @@ package ui
 import (
 	"math"
 	"strings"
+	"sync"
 
 	"github.com/egoist/mygo/internal/platform"
 	"github.com/egoist/mygo/internal/scene"
@@ -229,6 +230,12 @@ type textStyle struct {
 	background Color
 	// selection is the highlight of selected text, the theme's when unset.
 	selection Color
+	// strokeWidth and strokeColor stroke the outlines of the glyphs
+	// under their fill (TextStroke).
+	strokeWidth float32
+	strokeColor Color
+	// tabSize puts tab stops every tabSize spaces (TabSize).
+	tabSize float32
 }
 
 const (
@@ -249,9 +256,11 @@ const (
 	setSelection
 	setLang
 	setDecoOffset
+	setStroke
+	setTabSize
 
 	// setAll has every bit of textStyle.set.
-	setAll = setDecoOffset<<1 - 1
+	setAll = setTabSize<<1 - 1
 )
 
 // layoutStyle is what lays an element out, of what the view sets on it:
@@ -419,6 +428,7 @@ type node struct {
 	// Input the element takes itself (HandleInput), and where the caret of
 	// the text it takes is (TextCaret).
 	inputFn    func(InputEvent) bool
+	observeFn  func(InputEvent) // the input in it (ObserveInput)
 	textClient TextInputClient
 	caret      Rect
 	takesText  bool
@@ -492,6 +502,9 @@ type node struct {
 	accFill func(n *platform.AccessNode)
 	// accStep is how far the keys move the value of a range.
 	accStep float64
+	// keyShortcuts are the keys that press or focus the element, as the
+	// platform writes them (KeyShortcuts).
+	keyShortcuts string
 
 	// Layout results, in DIPs relative to the window.
 	x, y, w, h float32
@@ -604,6 +617,12 @@ type node struct {
 	attach  attachment
 	placed  attachment
 	flips   uint8
+	// zIndex orders the element's painting and its hits among its
+	// siblings (ZIndex); zOrder is set on an element with a child having
+	// one, which paints and commits its children in that order alone
+	// (zindex.go).
+	zIndex int32
+	zOrder bool
 	// serial is the order the pass made the element in: of overlays, the
 	// one made last shows on top.
 	serial int32
@@ -1483,6 +1502,11 @@ func (e *node) InsetShadow(x, y, blur, spread float32, c Color) *node {
 	return e
 }
 
+// NoShadow takes off the outer and inner shadows added so far, as CSS's
+// box-shadow: none, so that the Shadow and InsetShadow calls after it
+// start afresh.
+func (e *node) NoShadow() *node { e.shadows = e.shadows[:0]; return e }
+
 // Opacity makes the element and its children translucent.
 func (e *node) Opacity(o float32) *node {
 	e.opacity, e.opacitySet = max(0, min(o, 1)), true
@@ -1607,11 +1631,47 @@ func (e *node) TextBackground(c Color) *node {
 	return e
 }
 
+// TextStroke strokes the outlines of the glyphs of text width DIPs wide
+// in c, under their fill, as CSS's -webkit-text-stroke with paint-order:
+// stroke fill: the half of the stroke outside the glyphs shows around
+// them, a halo of c, as a chart's labels over its bars take one of the
+// background's color to stand out. A text's strokes all go under all
+// its glyphs, so that one glyph's stroke never covers its neighbor; the
+// stroke goes around the edge of the pixels of color glyphs, as emoji.
+// Underlines and strikethroughs are not stroked. A width of 0 strokes
+// nothing, where the elements around it stroke their text.
+func (e *node) TextStroke(width float32, c Color) *node {
+	linkStrokes()
+	e.ts.strokeWidth, e.ts.strokeColor = max(width, 0), c
+	e.ts.set |= setStroke
+	return e
+}
+
+// TabSize puts the tab stops of the element's text every n spaces of its
+// font from the start of each line, as CSS's tab-size: a tab advances
+// to the next of them, as a code block indents with tabs of 2 or 4
+// columns. A space is as wide as the font's, letter spacing included.
+// Without it, or with n at 0, tabs advance as the system's text stack
+// sets them, which differs between systems.
+func (e *node) TabSize(n float32) *node {
+	if n > 0 {
+		linkTabs.Do(text.Shared().UseTabSize)
+	}
+	e.ts.tabSize = max(n, 0)
+	e.ts.set |= setTabSize
+	return e
+}
+
+// linkTabs lets the text system set tab stops once an element sets a tab
+// size, so that apps that never do not link it.
+var linkTabs sync.Once
+
 // Strikethrough strikes text through.
 func (e *node) Strikethrough() *node { e.ts.strike = true; e.ts.set |= setStrike; return e }
 
 // LetterSpacing adds v DIPs after every character of text, or tightens it
-// with a negative v, as for labels in capitals.
+// with a negative v, as for labels in capitals; 0 takes away that of the
+// text around it, as for a number within such a label.
 func (e *node) LetterSpacing(v float32) *node {
 	e.ts.spacing = v
 	e.ts.set |= setSpacing
@@ -1832,6 +1892,9 @@ func (e *node) add(child *node) {
 	e.forgetIntrinsic()
 	child.parent = e
 	child.depth = e.depth + 1
+	if child.zIndex != 0 {
+		e.zOrder = true // set before it was added, as on a copy leaving (ghostOf)
+	}
 	if e.last == nil {
 		e.first = child
 	} else {
