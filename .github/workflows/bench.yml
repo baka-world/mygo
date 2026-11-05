@@ -6,13 +6,8 @@ name: Benchmarks
 # instead, as to fill in history, with this commit's scripts/bench.ts and
 # internal/idlemem.
 on:
-  push:
-    branches: [main]
-    paths-ignore:
-      - "**/*.md"
-      - LICENSE
-      - "docs/**"
-      - "website/**"
+  # The fork does not measure: the benchmarks branch and the site that reads
+  # it are upstream's, and a push here would pay for three runners.
   workflow_dispatch:
     inputs:
       ref:

@@ -10,6 +10,10 @@ on:
     paths-ignore:
       - "**/*.md"
       - LICENSE
+  # The fork builds dsh-gtk, a Linux app: a push runs the Linux job only, and
+  # the other platforms wait for this trigger. Upstream's CI covers them on the
+  # pull requests that matter.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -23,8 +27,25 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # A job-level if cannot read the matrix (it runs before the matrix exists),
+  # so the platform list is decided here and handed to the job below.
+  platforms:
+    name: Platforms
+    runs-on: ubuntu-latest
+    outputs:
+      include: ${{ steps.list.outputs.include }}
+    steps:
+      - id: list
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo 'include=[{"name":"macOS","os":"macos-latest"},{"name":"Linux","os":"ubuntu-latest"},{"name":"Windows","os":"windows-latest"}]' >> "$GITHUB_OUTPUT"
+          else
+            echo 'include=[{"name":"Linux","os":"ubuntu-latest"}]' >> "$GITHUB_OUTPUT"
+          fi
+
   test:
     name: ${{ matrix.name }}
+    needs: platforms
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     env:
@@ -32,10 +53,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { name: macOS, os: macos-latest }
-          - { name: Linux, os: ubuntu-latest }
-          - { name: Windows, os: windows-latest }
+        include: ${{ fromJSON(needs.platforms.outputs.include) }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
@@ -154,6 +172,7 @@ jobs:
   # The JavaScript packages are the same everywhere, so Bun is left out.
   windows-arm64:
     name: Windows ARM64
+    if: github.event_name == 'workflow_dispatch'
     runs-on: windows-11-arm
     timeout-minutes: 30
     steps:
